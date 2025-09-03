@@ -247,3 +247,29 @@ class ViTAttention(nnx.Module):
             hidden_states=attention_output, input_tensor=hidden_states, deterministic=deterministic
         )
         return hidden_states, attention_weights
+
+
+class ViTIntermediate(nnx.Module):
+    def __init__(
+        self, config: ViTConfig, *, dtype: jnp.dtype = jnp.float32, rngs: nnx.Rngs
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.dtype = dtype
+
+        self.linear = nnx.Linear(
+            in_features=config.hidden_size,
+            out_features=config.intermediate_size,
+            kernel_init=nnx.initializers.variance_scaling(
+                scale=self.config.initializer_range**2,
+                mode="fan_in",
+                distribution="truncated_normal",
+            ),
+            dtype=dtype,
+            rngs=rngs,
+        )
+
+    def __call__(self, hidden_states: jnp.ndarray) -> jnp.ndarray:
+        hidden_states = self.linear(hidden_states)
+        hidden_states = nnx.gelu(hidden_states)
+        return hidden_states
