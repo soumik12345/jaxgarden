@@ -1,3 +1,4 @@
+from ast import Tuple
 from dataclasses import dataclass
 
 import flax.nnx as nnx
@@ -164,7 +165,7 @@ class ViTSelfAttention(nnx.Module):
         hidden_states: jnp.ndarray,
         deterministic: bool = True,
         rngs: nnx.Rngs | None = None,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         head_dim = self.config.hidden_size // self.config.num_attention_heads
 
         query_states = self.query(hidden_states)
@@ -224,3 +225,25 @@ class ViTSelfOutput(nnx.Module):
         hidden_states = self.linear(hidden_states)
         hidden_states = self.dropout(hidden_states, deterministic=deterministic)
         return hidden_states
+
+
+class ViTAttention(nnx.Module):
+    def __init__(
+        self, config: ViTConfig, *, dtype: jnp.dtype = jnp.float32, rngs: nnx.Rngs
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.dtype = dtype
+        self.attention = ViTSelfAttention(config=config, dtype=dtype)
+        self.output = ViTSelfOutput(config=config, dtype=dtype)
+
+    def __call__(
+        self, hidden_states: jnp.ndarray, deterministic: bool = True
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        attention_output, attention_weights = self.attention(
+            hidden_states=hidden_states, deterministic=deterministic
+        )
+        hidden_states = self.output(
+            hidden_states=attention_output, input_tensor=hidden_states, deterministic=deterministic
+        )
+        return hidden_states, attention_weights
