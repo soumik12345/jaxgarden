@@ -53,6 +53,7 @@ class ViTPatchEmbeddings(nnx.Module):
                 scale=self.config.initializer_range**2,
                 mode="fan_in",
                 distribution="truncated_normal",
+                dtype=dtype,
             ),
             rngs=rngs,
         )
@@ -77,22 +78,28 @@ class ViTEmbeddings(nnx.Module):
         self.dtype = dtype
 
         cls_token_initializer = nnx.initializers.variance_scaling(
-            scale=self.config.initializer_range**2, mode="fan_in", distribution="truncated_normal"
+            scale=self.config.initializer_range**2,
+            mode="fan_in",
+            distribution="truncated_normal",
+            dtype=dtype,
         )
         cls_token_value = cls_token_initializer(
-            key=rngs.params(), shape=(1, 1, self.config.hidden_size), dtype=self.dtype
+            key=rngs.params(), shape=(1, 1, self.config.hidden_size), dtype=dtype
         )
         self.cls_token = nnx.Param(value=cls_token_value)
 
         self.patch_embeddings = ViTPatchEmbeddings(config, dtype=dtype, rngs=rngs)
 
         position_embeddings_initializer = nnx.initializers.variance_scaling(
-            scale=self.config.initializer_range**2, mode="fan_in", distribution="truncated_normal"
+            scale=self.config.initializer_range**2,
+            mode="fan_in",
+            distribution="truncated_normal",
+            dtype=dtype,
         )
         position_embeddings_value = position_embeddings_initializer(
             key=rngs.params(),
             shape=(1, self.patch_embeddings.num_patches + 1, self.config.hidden_size),
-            dtype=self.dtype,
+            dtype=dtype,
         )
         self.position_embeddings = nnx.Param(position_embeddings_value)
 
@@ -131,6 +138,7 @@ class ViTSelfAttention(nnx.Module):
                 scale=self.config.initializer_range**2,
                 mode="fan_in",
                 distribution="truncated_normal",
+                dtype=dtype,
             ),
             dtype=dtype,
             rngs=rngs,
@@ -144,6 +152,7 @@ class ViTSelfAttention(nnx.Module):
                 scale=self.config.initializer_range**2,
                 mode="fan_in",
                 distribution="truncated_normal",
+                dtype=dtype,
             ),
             rngs=rngs,
         )
@@ -156,6 +165,7 @@ class ViTSelfAttention(nnx.Module):
                 scale=self.config.initializer_range**2,
                 mode="fan_in",
                 distribution="truncated_normal",
+                dtype=dtype,
             ),
             rngs=rngs,
         )
@@ -217,7 +227,7 @@ class ViTSelfOutput(nnx.Module):
             dtype=dtype,
             rngs=rngs,
         )
-        self.dropout = nnx.Dropout(rate=config.hidden_dropout_prob)
+        self.dropout = nnx.Dropout(rate=config.hidden_dropout_prob, rngs=rngs)
 
     def __call__(
         self, hidden_states: jnp.ndarray, input_tensor: jnp.ndarray, deterministic: bool = True
@@ -234,8 +244,8 @@ class ViTAttention(nnx.Module):
         super().__init__()
         self.config = config
         self.dtype = dtype
-        self.attention = ViTSelfAttention(config=config, dtype=dtype)
-        self.output = ViTSelfOutput(config=config, dtype=dtype)
+        self.attention = ViTSelfAttention(config=config, dtype=dtype, rngs=rngs)
+        self.output = ViTSelfOutput(config=config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self, hidden_states: jnp.ndarray, deterministic: bool = True
@@ -273,3 +283,69 @@ class ViTIntermediate(nnx.Module):
         hidden_states = self.linear(hidden_states)
         hidden_states = nnx.gelu(hidden_states)
         return hidden_states
+
+
+class ViTOutput(nnx.Module):
+    def __init__(
+        self, config: ViTConfig, *, dtype: jnp.dtype = jnp.float32, rngs: nnx.Rngs
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.dtype = dtype
+
+        self.linear = nnx.Linear(
+            in_features=config.intermediate_size,
+            out_features=config.hidden_size,
+            kernel_init=nnx.initializers.variance_scaling(
+                scale=self.config.initializer_range**2,
+                mode="fan_in",
+                distribution="truncated_normal",
+            ),
+            dtype=dtype,
+            rngs=rngs,
+        )
+        self.dropout = nnx.Dropout(rate=config.hidden_dropout_prob, rngs=rngs)
+
+    def __call__(
+        self, hidden_states: jnp.ndarray, attention_output: jnp.ndarray, deterministic: bool = True
+    ) -> jnp.ndarray:
+        hidden_states = self.linear(hidden_states)
+        hidden_states = self.dropout(hidden_states, deterministic=deterministic)
+        hidden_states = hidden_states + attention_output
+        return hidden_states
+
+
+class ViTLayer(nnx.Module):
+    def __init__(
+        self, config: ViTConfig, *, dtype: jnp.dtype = jnp.float32, rngs: nnx.Rngs
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.dtype = dtype
+
+        self.attention = ViTAttention(config=config, dtype=dtype, rngs=rngs)
+        self.intermediate = ViTIntermediate(config=config, dtype=dtype, rngs=rngs)
+        self.output = ViTOutput(config=config, dtype=dtype, rngs=rngs)
+        self.layernorm_before_self_attention = nnx.LayerNorm(
+            num_features=config.hidden_size, epsilon=config.layer_norm_eps, dtype=dtype, rngs=rngs
+        )
+        self.layernorm_after_self_attention = nnx.LayerNorm(
+            num_features=config.hidden_size, epsilon=config.layer_norm_eps, dtype=dtype, rngs=rngs
+        )
+
+    def __call__(
+        self, hidden_states: jnp.ndarray, deterministic: bool = True
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        attention_output, attention_weights = self.attention(
+            hidden_states=self.layernorm_before_self_attention(hidden_states),
+            deterministic=deterministic,
+        )
+        attention_output = attention_output + hidden_states
+        layer_output = self.layernorm_after(attention_output)
+        hidden_states = self.intermediate(hidden_states=layer_output)
+        hidden_states = self.output(
+            hidden_states=hidden_states,
+            attention_output=attention_output,
+            deterministic=deterministic,
+        )
+        return hidden_states, attention_weights
