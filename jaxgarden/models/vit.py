@@ -41,9 +41,6 @@ class ViTPatchEmbeddings(nnx.Module):
         patch_size = self.config.patch_size
         self.num_patches = (image_size // patch_size) * (image_size // patch_size)
         self.num_channels = self.config.num_channels
-        kernel_initializer = nnx.initializers.variance_scaling(
-            scale=self.config.initializer_range**2, mode="fan_in", distribution="truncated_normal"
-        )
         self.projection = nnx.Conv(
             in_features=self.num_channels,
             out_features=self.config.hidden_size,
@@ -51,7 +48,11 @@ class ViTPatchEmbeddings(nnx.Module):
             strides=(patch_size, patch_size),
             padding="VALID",
             dtype=self.dtype,
-            kernel_init=kernel_initializer,
+            kernel_init=nnx.initializers.variance_scaling(
+                scale=self.config.initializer_range**2,
+                mode="fan_in",
+                distribution="truncated_normal",
+            ),
             rngs=rngs,
         )
 
@@ -59,7 +60,8 @@ class ViTPatchEmbeddings(nnx.Module):
         num_channels = pixel_values.shape[-1]
         if num_channels != self.num_channels:
             raise ValueError(
-                "Make sure that the channel dimension of the pixel values match with the one set in the configuration."  # noqa: E501
+                "Make sure that the channel dimension of the pixel values match with"
+                " the one set in the configuration."
             )
         embeddings = self.projection(pixel_values)
         return jnp.reshape(embeddings, (embeddings.shape[0], -1, embeddings.shape[-1]))
@@ -95,14 +97,14 @@ class ViTEmbeddings(nnx.Module):
 
         self.dropout = nnx.Dropout(rate=self.config.hidden_dropout_prob, rngs=rngs)
 
-    def __call__(self, pixel_values: jnp.ndarray, rngs: nnx.Rngs | None = None) -> jnp.ndarray:
+    def __call__(self, pixel_values: jnp.ndarray, deterministic: bool = True) -> jnp.ndarray:
         embeddings = self.patch_embeddings(pixel_values=pixel_values)
         cls_tokens = jnp.broadcast_to(
             self.cls_token.value, shape=(pixel_values.shape[0], 1, self.config.hidden_size)
         )
         embeddings = jnp.concatenate((cls_tokens, embeddings), axis=1)
         embeddings = embeddings + self.position_embeddings.value
-        embeddings = self.dropout(embeddings, rngs=rngs)
+        embeddings = self.dropout(embeddings, deterministic=deterministic)
         return embeddings
 
 
@@ -116,8 +118,8 @@ class ViTSelfAttention(nnx.Module):
 
         if self.config.hidden_size % self.config.num_attention_heads != 0:
             raise ValueError(
-                "`config.hidden_size`: {self.config.hidden_size} has to be a multiple of `config.num_attention_heads`:"  # noqa: E501
-                " {self.config.num_attention_heads}"
+                "`config.hidden_size`: {self.config.hidden_size} has to be a multiple of"
+                " `config.num_attention_heads`: {self.config.num_attention_heads}"
             )
 
         self.query = nnx.Linear(
@@ -193,3 +195,32 @@ class ViTSelfAttention(nnx.Module):
         attention_output = attention_output.reshape((*attention_output.shape[:2], -1))
 
         return attention_output, attention_weights
+
+
+class ViTSelfOutput(nnx.Module):
+    def __init__(
+        self, config: ViTConfig, *, dtype: jnp.dtype = jnp.float32, rngs: nnx.Rngs
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.dtype = dtype
+
+        self.linear = nnx.Linear(
+            in_features=config.hidden_size,
+            out_features=config.hidden_size,
+            kernel_init=nnx.initializers.variance_scaling(
+                scale=self.config.initializer_range**2,
+                mode="fan_in",
+                distribution="truncated_normal",
+            ),
+            dtype=dtype,
+            rngs=rngs,
+        )
+        self.dropout = nnx.Dropout(rate=config.hidden_dropout_prob)
+
+    def __call__(
+        self, hidden_states: jnp.ndarray, input_tensor: jnp.ndarray, deterministic: bool = True
+    ) -> jnp.ndarray:
+        hidden_states = self.linear(hidden_states)
+        hidden_states = self.dropout(hidden_states, deterministic=deterministic)
+        return hidden_states
